@@ -1,0 +1,10 @@
+{
+    "display_name": "Qwen3-TTS (KoboldCpp)",
+    "loading_order": 15,
+    "requires": [],
+    "js": "index.js",
+    "author": "stan0202",
+    "version": "1.0.0",
+    "homePage": "https://github.com/stan0202/ST-Extension-Qwen3TTS",
+    "auto_update": true
+}
