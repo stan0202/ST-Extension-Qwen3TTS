@@ -1,21 +1,29 @@
 // Qwen3-TTS (KoboldCpp) — SillyTavern TTS provider
-// Adds a "Qwen3-TTS" voice source that talks to a KoboldCpp /v1/audio/speech
-// endpoint running the Qwen3-TTS 1.7B CustomVoice model.
 //
-// Why this exists: the built-in "OpenAI Compatible" provider works against
-// KoboldCpp for basic TTS, but its ST backend drops the `language` and
-// `instruction` fields that Qwen3-TTS uses for language selection and
-// style/emotion control. This provider talks to KoboldCpp directly (it sends
-// CORS headers) so those fields survive.
+// Routes through SillyTavern's own backend (/api/openai/custom/generate-voice),
+// exactly like the built-in "OpenAI Compatible" provider. That keeps the call
+// same-origin (ST backend does the server-side fetch to the endpoint), so it
+// works even when ST is served over https and KoboldCpp is plain http — no
+// Mixed Content block, no CORS needed.
 //
-// KoboldCpp /v1/audio/speech request fields that actually matter:
-//   input         -> text to speak
-//   voice         -> speaker name (Vivian, Ryan, ...)
-//   language      -> en|zh|ja|ko|de|es|fr|ru|it|pt  ("" = let KoboldCpp default)
-//   instruction   -> style/emotion, e.g. "用特别愤怒的语气说" ("" = auto / extract from [brackets])
-//   response_format -> wav | mp3
+// Trade-off vs. talking to KoboldCpp directly: the ST backend only forwards
+//   input / voice / response_format / speed / model
+// so `language` and `instruction` do NOT survive as separate JSON fields.
+// Workarounds:
+//   - language  -> let KoboldCpp auto-detect (Qwen3-TTS handles zh/en/ja/ko well)
+//   - instruction -> prepend a "[style]" prefix to the text. KoboldCpp's
+//     tts_extract_instruction() auto-splits a leading [bracket] into the
+//     instruction, so the global "Style / Instruction" below is injected there.
+//
+// KoboldCpp /v1/audio/speech fields (for reference):
+//   input          -> text (with optional [instruction] prefix)
+//   voice          -> speaker name (Vivian, Ryan, ...)
+//   language       -> en|zh|ja|ko|...   (auto if omitted)
+//   instruction    -> style/emotion     (auto from [brackets] if omitted)
+//   response_format-> wav | mp3
 //   (speed, model are ignored by KoboldCpp but accepted)
 
+import { getRequestHeaders } from '../../../../script.js';
 import { registerTtsProvider, saveTtsProviderSettings } from '../../tts/index.js';
 
 const QWEN_VOICES = [
@@ -30,21 +38,6 @@ const QWEN_VOICES = [
     'Sohee',      // warm Korean female, rich emotion     (Korean)
 ];
 
-// Values understood by KoboldCpp's C++ set_language()
-const LANGUAGES = [
-    { value: '',     label: 'Auto (KoboldCpp default)' },
-    { value: 'en',   label: 'English' },
-    { value: 'zh',   label: 'Chinese' },
-    { value: 'ja',   label: 'Japanese' },
-    { value: 'ko',   label: 'Korean' },
-    { value: 'de',   label: 'German' },
-    { value: 'es',   label: 'Spanish' },
-    { value: 'fr',   label: 'French' },
-    { value: 'ru',   label: 'Russian' },
-    { value: 'it',   label: 'Italian' },
-    { value: 'pt',   label: 'Portuguese' },
-];
-
 class Qwen3TtsProvider {
     settings;
     voices = [];
@@ -53,17 +46,13 @@ class Qwen3TtsProvider {
     defaultSettings = {
         voiceMap: {},
         model: 'Qwen3-TTS',
-        provider_endpoint: 'http://127.0.0.1:5001/v1/audio/speech',
+        provider_endpoint: 'http://192.168.0.99:5001/v1/audio/speech',
         available_voices: QWEN_VOICES.slice(),
-        language: '',
         instruction: '',
         response_format: 'mp3',
     };
 
     get settingsHtml() {
-        const langOptions = LANGUAGES
-            .map(l => `<option value="${l.value}">${l.label}</option>`)
-            .join('');
         return `
         <label for="qwen3tts_endpoint">Provider Endpoint:</label>
         <div class="flex-container alignItemsCenter">
@@ -71,18 +60,14 @@ class Qwen3TtsProvider {
                 <input id="qwen3tts_endpoint" type="text" class="text_pole" maxlength="500" value="${this.defaultSettings.provider_endpoint}"/>
             </div>
         </div>
-        <div class="info">KoboldCpp /v1/audio/speech URL, e.g. <code>http://&lt;host&gt;:5001/v1/audio/speech</code>. No API key needed unless KoboldCpp was started with a password.</div>
+        <div class="info">KoboldCpp /v1/audio/speech URL. The ST backend fetches this server-side, so it works over https without CORS. No API key unless KoboldCpp was started with a password.</div>
         <label for="qwen3tts_model">Model:</label>
         <input id="qwen3tts_model" type="text" class="text_pole" maxlength="500" value="${this.defaultSettings.model}"/>
         <label for="qwen3tts_voices">Available Voices (comma separated):</label>
         <input id="qwen3tts_voices" type="text" class="text_pole" value="${this.defaultSettings.available_voices.join(', ')}"/>
-        <label for="qwen3tts_language">Language:</label>
-        <select id="qwen3tts_language" class="default">
-            ${langOptions}
-        </select>
         <label for="qwen3tts_instruction">Style / Instruction (optional):</label>
         <input id="qwen3tts_instruction" type="text" class="text_pole" maxlength="500" placeholder="e.g. 用特别愤怒的语气说  /  whisper, very softly  /  speak like a narrator"/>
-        <div class="info">Applies to every line. Leave blank to auto-detect. KoboldCpp also reads a <code>[style]</code> prefix in the message text when this is blank.</div>
+        <div class="info">Injected as a <code>[style]</code> prefix on every line (KoboldCpp auto-extracts it). Leave blank for natural delivery. Language is auto-detected by KoboldCpp.</div>
         <label for="qwen3tts_format">Audio Format:</label>
         <select id="qwen3tts_format" class="default">
             <option value="mp3">mp3</option>
@@ -91,7 +76,6 @@ class Qwen3TtsProvider {
     }
 
     async loadSettings(settings) {
-        // Only accept keys defined in defaultSettings
         this.settings = this.defaultSettings;
         for (const key in settings) {
             if (key in this.settings) {
@@ -107,9 +91,6 @@ class Qwen3TtsProvider {
 
         $('#qwen3tts_voices').val(this.settings.available_voices.join(', '));
         $('#qwen3tts_voices').on('input', () => this.onSettingsChange());
-
-        $('#qwen3tts_language').val(this.settings.language);
-        $('#qwen3tts_language').on('change', () => this.onSettingsChange());
 
         $('#qwen3tts_instruction').val(this.settings.instruction);
         $('#qwen3tts_instruction').on('input', () => this.onSettingsChange());
@@ -128,7 +109,6 @@ class Qwen3TtsProvider {
             .split(',')
             .map(s => s.trim())
             .filter(Boolean);
-        this.settings.language = String($('#qwen3tts_language').val());
         this.settings.instruction = String($('#qwen3tts_instruction').val());
         this.settings.response_format = String($('#qwen3tts_format').val());
         saveTtsProviderSettings();
@@ -157,10 +137,24 @@ class Qwen3TtsProvider {
         }));
     }
 
+    // Inject the global instruction as a [bracket] prefix, which KoboldCpp's
+    // tts_extract_instruction() splits out into the instruction automatically.
+    // Only prepend if the text doesn't already start with a [bracket].
+    applyInstruction(text) {
+        const instr = (this.settings.instruction || '').trim();
+        if (!instr) {
+            return text;
+        }
+        if (text.trimStart().startsWith('[')) {
+            return text; // user already wrote their own [style]
+        }
+        return `[${instr}] ${text}`;
+    }
+
     async previewTtsVoice(voiceId) {
         this.audioElement.pause();
         this.audioElement.currentTime = 0;
-        const response = await this.fetchTtsGeneration('Neque porro quisquam est qui dolorem ipsum.', voiceId);
+        const response = await this.fetchTtsGeneration(this.applyInstruction('Neque porro quisquam est qui dolorem ipsum.'), voiceId);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -172,24 +166,23 @@ class Qwen3TtsProvider {
     }
 
     async generateTts(text, voiceId) {
-        const response = await this.fetchTtsGeneration(text, voiceId);
-        return response;
+        return await this.fetchTtsGeneration(this.applyInstruction(text), voiceId);
     }
 
     async fetchTtsGeneration(inputText, voiceId) {
         console.info(`Qwen3-TTS: generating for voice_id ${voiceId}`);
-        const body = {
-            input: inputText,
-            voice: voiceId,
-            response_format: this.settings.response_format,
-            model: this.settings.model,
-            language: this.settings.language,
-            instruction: this.settings.instruction,
-        };
-        const response = await fetch(this.settings.provider_endpoint, {
+        // Same backend route the built-in OpenAI-compatible provider uses.
+        const response = await fetch('/api/openai/custom/generate-voice', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                provider_endpoint: this.settings.provider_endpoint,
+                model: this.settings.model,
+                input: inputText,
+                voice: voiceId,
+                response_format: this.settings.response_format,
+                speed: 1,
+            }),
         });
         if (!response.ok) {
             const errText = await response.text().catch(() => '');
