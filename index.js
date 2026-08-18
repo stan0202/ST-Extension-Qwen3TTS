@@ -154,18 +154,28 @@ class Qwen3TtsProvider {
             .trim();
     }
 
-    // Inject the global instruction as a [bracket] prefix, which KoboldCpp's
-    // tts_extract_instruction() splits out into the instruction automatically.
-    // Only prepend if the text doesn't already start with a [bracket].
+    // Extract ALL [tone] brackets anywhere in the text (KoboldCpp's built-in
+    // tts_extract_instruction only handles a single one at the start), merge
+    // them with the global Style/Instruction setting into a single [combined]
+    // prefix, and return the text with every bracket removed:
+    //   "[ashamed]I— want to— ... [happy]There," + global "whisper"
+    //     -> "[ashamed; happy; whisper] I— want to— ... There,"
     applyInstruction(text) {
-        const instr = (this.settings.instruction || '').trim();
-        if (!instr) {
-            return text;
+        const instrs = [];
+        const re = /\[([^\]]+)\]/g;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            instrs.push(m[1].trim());
         }
-        if (text.trimStart().startsWith('[')) {
-            return text; // user already wrote their own [style]
+        const plain = text.replace(re, '').replace(/ {2,}/g, ' ').trim();
+        const global = (this.settings.instruction || '').trim();
+        if (global) {
+            instrs.push(global);
         }
-        return `[${instr}] ${text}`;
+        if (instrs.length === 0) {
+            return plain;
+        }
+        return `[${instrs.join('; ')}] ${plain}`;
     }
 
     async previewTtsVoice(voiceId) {
