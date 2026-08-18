@@ -137,6 +137,33 @@ class Qwen3TtsProvider {
         }));
     }
 
+    // Clean decorative / non-spoken characters so TTS reads naturally:
+    //   "..." / '...' / 「...」 / 『...』  → strip surrounding quotes
+    //   ... (space-3dots-space, segment separator) → . (period)
+    //   — (em dash, pause)  → , (comma, natural pause)
+    //   ... (trailing dots, trailing off) → , (comma)
+    //   -- / --- (ASCII dashes) → ,
+    // Normal punctuation (. , ! ?) is left alone — TTS handles them fine.
+    cleanForTts(text) {
+        if (!text) return text;
+        return text
+            // Remove double quotes (straight " and curly “ ”) that wrap dialogue.
+            // Single quotes are kept — they're apostrophes in English (I've, don't).
+            .replace(/[\u0022\u201c\u201d]/g, '')
+            // Remove CJK brackets
+            .replace(/[「」『』]/g, '')
+            // " ... " segment separator (space + 3+ dots + space) → period
+            .replace(/\s+\.{3,}\s+/g, '. ')
+            .replace(/[—–]/g, ',')
+            // ASCII dashes used as pauses: -- or ---
+            .replace(/-{2,}/g, ',')
+            // Trailing ellipsis (3+ dots NOT surrounded by spaces) → comma
+            .replace(/\.{3,}/g, ',')
+            // Collapse 2+ spaces into 1
+            .replace(/ {2,}/g, ' ')
+            .trim();
+    }
+
     // Inject the global instruction as a [bracket] prefix, which KoboldCpp's
     // tts_extract_instruction() splits out into the instruction automatically.
     // Only prepend if the text doesn't already start with a [bracket].
@@ -154,7 +181,7 @@ class Qwen3TtsProvider {
     async previewTtsVoice(voiceId) {
         this.audioElement.pause();
         this.audioElement.currentTime = 0;
-        const response = await this.fetchTtsGeneration(this.applyInstruction('Neque porro quisquam est qui dolorem ipsum.'), voiceId);
+        const response = await this.fetchTtsGeneration(this.applyInstruction(this.cleanForTts('Neque porro quisquam est qui dolorem ipsum.')), voiceId);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -166,7 +193,7 @@ class Qwen3TtsProvider {
     }
 
     async generateTts(text, voiceId) {
-        return await this.fetchTtsGeneration(this.applyInstruction(text), voiceId);
+        return await this.fetchTtsGeneration(this.applyInstruction(this.cleanForTts(text)), voiceId);
     }
 
     async fetchTtsGeneration(inputText, voiceId) {
