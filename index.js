@@ -137,29 +137,19 @@ class Qwen3TtsProvider {
         }));
     }
 
-    // Clean decorative / non-spoken characters so TTS reads naturally:
-    //   "..." / '...' / 「...」 / 『...』  → strip surrounding quotes
-    //   ... (space-3dots-space, segment separator) → . (period)
-    //   — (em dash, pause)  → , (comma, natural pause)
-    //   ... (trailing dots, trailing off) → , (comma)
-    //   -- / --- (ASCII dashes) → ,
-    // Normal punctuation (. , ! ?) is left alone — TTS handles them fine.
+    // Minimal cleanup: strip double quotes so a leading [tone] reaches the
+    // start of the text (KoboldCpp's tts_extract_instruction regex is ^\[...],
+    // and a wrapping " before it would prevent the match). Qwen TTS handles
+    // the pauses (— / ...) on its own, so nothing else is touched.
+    // Single quotes are kept — they're apostrophes in English (I've, don't).
     cleanForTts(text) {
         if (!text) return text;
         return text
-            // Remove double quotes (straight " and curly “ ”) that wrap dialogue.
-            // Single quotes are kept — they're apostrophes in English (I've, don't).
+            // Remove double quotes (straight " and curly “ ”) that wrap dialogue
             .replace(/[\u0022\u201c\u201d]/g, '')
-            // Remove CJK brackets
+            // Remove CJK quote brackets
             .replace(/[「」『』]/g, '')
-            // " ... " segment separator (space + 3+ dots + space) → period
-            .replace(/\s+\.{3,}\s+/g, '. ')
-            .replace(/[—–]/g, ',')
-            // ASCII dashes used as pauses: -- or ---
-            .replace(/-{2,}/g, ',')
-            // Trailing ellipsis (3+ dots NOT surrounded by spaces) → comma
-            .replace(/\.{3,}/g, ',')
-            // Collapse 2+ spaces into 1
+            // Collapse 2+ spaces into 1, trim
             .replace(/ {2,}/g, ' ')
             .trim();
     }
